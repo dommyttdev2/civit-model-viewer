@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Civitaiコレクションのファイル名とトリガーワードを整理・コピーします。">
+    <title>Collection Lens — Civitai Model Inventory</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="product-bar">
+        <div class="product-identity">
+          <div class="monogram" aria-hidden="true"><span>C</span><span>L</span></div>
+          <div>
+            <p class="product-kicker">CIVITAI MODEL INVENTORY</p>
+            <h1>Collection Lens</h1>
+          </div>
+        </div>
+        <p class="product-purpose">モデルの実体と呼び出し方を、ひとつの棚で確認する。</p>
+        <div class="key-status"><span aria-hidden="true"></span>API key stays local</div>
+      </header>
+
+      {% if error %}
+        <section class="system-notice system-notice-error" role="alert">
+          <p class="notice-label">CONNECTION ERROR</p>
+          <h2>コレクションを読み込めませんでした</h2>
+          <p>{{ error }}</p>
+        </section>
+      {% elif not collections %}
+        <section class="system-notice">
+          <p class="notice-label">EMPTY LIBRARY</p>
+          <h2>Modelコレクションがありません</h2>
+          <p>Civitaiでモデル用コレクションを作成してから、この画面を再読み込みしてください。</p>
+        </section>
+      {% else %}
+        <div class="workspace-frame">
+          <aside class="library-pane" aria-labelledby="collection-heading">
+            <div class="library-heading">
+              <div>
+                <p class="pane-label">YOUR LIBRARY</p>
+                <h2 id="collection-heading">コレクション</h2>
+                <p>コレクションを選ぶと、収録アイテムを右側へ読み込みます。</p>
+              </div>
+              <span class="library-total">{{ collections|length }}</span>
+            </div>
+
+            <div class="selection-tools" aria-label="選択操作">
+              <button type="button" id="select-all">すべて選択</button>
+              <span aria-hidden="true">/</span>
+              <button type="button" id="clear-all">選択解除</button>
+            </div>
+
+            <div id="collection-form">
+              <div class="collection-list">
+                {% for collection in collections %}
+                  <label class="collection-card">
+                    <input class="collection-checkbox" type="checkbox" name="collectionIds" value="{{ collection.id }}">
+                    <span class="thumbnail-frame">
+                      <img
+                        src="{{ url_for('collection_thumbnail', collection_id=collection.id) }}"
+                        alt=""
+                        loading="lazy"
+                      >
+                    </span>
+                    <span class="collection-copy">
+                      <strong>{{ collection.name }}</strong>
+                      <span>{{ collection.description or '説明はありません' }}</span>
+                      <span class="collection-meta">
+                        <span class="visibility-pill visibility-{{ collection.read|lower }}">{{ collection.read|upper }}</span>
+                        <span>MODEL COLLECTION</span>
+                      </span>
+                    </span>
+                    <span class="selection-mark" aria-hidden="true">✓</span>
+                  </label>
+                {% endfor %}
+              </div>
+
+              <div class="selection-console">
+                <div class="selection-number">
+                  <span id="selection-count">0</span>
+                  <small>selected</small>
+                </div>
+                <p id="selection-status" aria-live="polite">コレクションを選択してください</p>
+              </div>
+            </div>
+          </aside>
+
+          <section class="item-picker-pane" id="item-picker" aria-labelledby="item-picker-heading">
+            <header class="item-picker-heading">
+              <div>
+                <p class="pane-label">SELECT MODELS</p>
+                <h2 id="item-picker-heading">アイテムを選択</h2>
+                <p>表示したいモデルだけを選んでください。</p>
+              </div>
+              <div class="item-selection-number">
+                <span id="item-selection-count">0</span>
+                <small>selected</small>
+              </div>
+            </header>
+
+            <div class="item-selection-tools" id="item-selection-tools" hidden>
+              <div class="item-bulk-actions">
+                <button type="button" id="item-select-all">すべて選択</button>
+                <span aria-hidden="true">/</span>
+                <button type="button" id="item-clear-all">選択解除</button>
+              </div>
+              <label class="item-search-field" for="item-search">
+                <span>FILTER</span>
+                <input
+                  type="search"
+                  id="item-search"
+                  placeholder="モデル名・ファイル名で検索"
+                  autocomplete="off"
+                >
+              </label>
+            </div>
+
+            <div class="item-picker-empty" id="item-picker-empty">
+              <span class="item-picker-step" aria-hidden="true">02</span>
+              <div>
+                <h3>先にコレクションを選択</h3>
+                <p>選択したコレクションに含まれるモデルをここへ並べます。</p>
+              </div>
+            </div>
+
+            <div id="item-picker-content" hidden>
+              <div class="item-search-empty" id="item-search-empty" hidden>
+                <strong>一致するアイテムがありません</strong>
+                <span>検索語を変えてお試しください。</span>
+              </div>
+              <div id="item-groups"></div>
+            </div>
+            <p class="item-picker-status" id="item-picker-status" aria-live="polite"></p>
+          </section>
+
+          <section class="manifest-pane" id="selected-results" aria-labelledby="results-heading">
+            <header class="manifest-heading">
+              <div>
+                <p class="pane-label">SELECTED MANIFEST</p>
+                <h2 id="results-heading">選択アイテムのファイルとトリガーワード</h2>
+              </div>
+              <button type="button" class="copy-button" id="copy-json" hidden>
+                <span aria-hidden="true">{ }</span>
+                JSONをコピー
+              </button>
+            </header>
+
+            <div class="empty-manifest" id="empty-manifest">
+              <div class="empty-specimen" aria-hidden="true">
+                <span>FILE</span>
+                <span>TRIGGER</span>
+                <span>MODEL</span>
+              </div>
+              <div>
+                <h3>表示するアイテムを選択</h3>
+                <p>上段で選んだモデルのファイル名、バージョン、トリガーワードをここに並べます。</p>
+              </div>
+            </div>
+
+            <div id="results-content" hidden>
+              <div class="result-summary" id="result-summary" aria-live="polite"></div>
+              <div id="result-groups"></div>
+            </div>
+          </section>
+        </div>
+      {% endif %}
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>
