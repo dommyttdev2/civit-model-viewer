@@ -80,6 +80,20 @@ MODEL_VERSIONS = {
         "id": 504,
         "name": "v1",
         "trainedWords": ["pov trigger"],
+        "images": [
+            {
+                "type": "video",
+                "url": "https://image.civitai.com/example/original=true/mature.mp4",
+                "width": 768,
+                "height": 1024,
+            },
+            {
+                "type": "image",
+                "url": "https://image.civitai.com/example/original=true/mature.jpeg",
+                "width": 832,
+                "height": 1216,
+            },
+        ],
         "files": [
             {
                 "id": 7005,
@@ -660,6 +674,22 @@ def test_nsfw_collection_uses_mature_domain_and_exports_models(live_app):
         }
     ]
     assert collection["items"][0]["versions"][0]["versionId"] == 504
+
+
+def test_nsfw_model_thumbnail_skips_video_media(live_app):
+    response = requests.post(
+        f"{live_app}/api/selection",
+        json={"collectionIds": [33]},
+        timeout=5,
+    )
+
+    assert response.status_code == 200
+    item = response.json()["collections"][0]["items"][0]
+    assert item["thumbnailUrl"] == (
+        "https://image.civitai.com/example/width=450/mature.jpeg"
+    )
+    assert item["thumbnailWidth"] == 832
+    assert item["thumbnailHeight"] == 1216
 
 
 def test_collection_thumbnail_redirects_to_civitai_image(live_app):

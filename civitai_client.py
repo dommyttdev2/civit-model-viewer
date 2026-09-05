@@ -407,12 +407,21 @@ class CivitaiClient:
             raw_images = detail.get("images")
             if not isinstance(raw_images, list):
                 raw_images = []
+
+            def is_static_image(image: Any) -> bool:
+                if not isinstance(image, dict) or not image.get("url"):
+                    return False
+                media_type = str(image.get("type") or "").lower()
+                if media_type == "video":
+                    return False
+                return not re.search(
+                    r"\.(?:mp4|webm|mov)(?:$|[?#])",
+                    str(image["url"]),
+                    flags=re.IGNORECASE,
+                )
+
             thumbnail = next(
-                (
-                    image
-                    for image in raw_images
-                    if isinstance(image, dict) and image.get("url")
-                ),
+                (image for image in raw_images if is_static_image(image)),
                 {},
             )
             thumbnail_url = thumbnail.get("url")
