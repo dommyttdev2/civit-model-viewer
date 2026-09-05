@@ -187,6 +187,9 @@
     item.versionId = selectedVersion.versionId;
     item.versionName = selectedVersion.versionName;
     item.modelUrl = selectedVersion.modelUrl;
+    item.thumbnailUrl = selectedVersion.thumbnailUrl;
+    item.thumbnailWidth = selectedVersion.thumbnailWidth;
+    item.thumbnailHeight = selectedVersion.thumbnailHeight;
     item.trainedWords = selectedVersion.trainedWords;
     item.files = selectedVersion.files;
     delete item.error;
@@ -343,6 +346,32 @@
     return node;
   };
 
+  const updateModelThumbnail = (frame, item) => {
+    const image = frame.querySelector("img");
+    const hasThumbnail = Boolean(item.thumbnailUrl);
+    image.src = item.thumbnailUrl || "/static/model-placeholder.svg";
+    image.alt = hasThumbnail ? `${item.modelName}のサムネイル` : "";
+    image.width = Number(item.thumbnailWidth) || 320;
+    image.height = Number(item.thumbnailHeight) || 400;
+    image.dataset.fallback = hasThumbnail ? "false" : "true";
+  };
+
+  const createModelThumbnail = (item, className) => {
+    const frame = element("span", className);
+    const image = element("img");
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.addEventListener("error", () => {
+      if (image.dataset.fallback === "true") return;
+      image.dataset.fallback = "true";
+      image.src = "/static/model-placeholder.svg";
+      image.alt = "";
+    });
+    frame.append(image);
+    updateModelThumbnail(frame, item);
+    return frame;
+  };
+
   const renderFile = (file) => {
     const row = element("div", "file-row");
     const identity = element("div", "file-identity");
@@ -362,6 +391,7 @@
     const card = element("article", "model-card");
     const header = element("div", "model-header");
     header.append(element("span", "model-index", String(index + 1).padStart(2, "0")));
+    header.append(createModelThumbnail(item, "model-thumbnail"));
     const title = element("div");
     const heading = element("h4");
     const modelLink = element("a", "model-title-link", item.modelName);
@@ -519,6 +549,7 @@
       applyItemFilter();
     });
 
+    const thumbnail = createModelThumbnail(item, "item-thumbnail");
     const marker = element("span", "item-option-marker", "✓");
     const copy = element("span", "item-option-copy");
     copy.append(element("strong", null, item.modelName));
@@ -541,7 +572,7 @@
     );
     facts.append(fileFact, triggerFact);
     copy.append(facts);
-    label.append(checkbox, marker, copy);
+    label.append(checkbox, thumbnail, copy, marker);
 
     const actions = element("div", "item-option-actions");
     const versionControl = element("label", "version-control");
@@ -575,6 +606,7 @@
       fileFact.textContent = `${item.files.length} FILE${item.files.length === 1 ? "" : "S"}`;
       triggerFact.textContent = `${item.trainedWords.length} TRIGGER${item.trainedWords.length === 1 ? "" : "S"}`;
       link.href = item.modelUrl;
+      updateModelThumbnail(thumbnail, item);
       updateSelectedResults();
       applyItemFilter();
     });

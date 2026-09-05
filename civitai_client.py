@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -403,6 +404,30 @@ class CivitaiClient:
                         "precision": metadata.get("fp"),
                     }
                 )
+            raw_images = detail.get("images")
+            if not isinstance(raw_images, list):
+                raw_images = []
+            thumbnail = next(
+                (
+                    image
+                    for image in raw_images
+                    if isinstance(image, dict) and image.get("url")
+                ),
+                {},
+            )
+            thumbnail_url = thumbnail.get("url")
+            if isinstance(thumbnail_url, str) and thumbnail_url.startswith(
+                (
+                    "https://image.civitai.com/",
+                    "https://imagecache.civitai.com/",
+                )
+            ):
+                thumbnail_url = re.sub(
+                    r"/(?:original=true|width=\d+)/",
+                    "/width=450/",
+                    thumbnail_url,
+                    count=1,
+                )
             return {
                 "versionId": version_id,
                 "versionName": str(detail.get("name") or fallback_name),
@@ -410,6 +435,9 @@ class CivitaiClient:
                     f"https://civitai.com/models/{model_id}"
                     f"?modelVersionId={version_id}"
                 ),
+                "thumbnailUrl": thumbnail_url,
+                "thumbnailWidth": thumbnail.get("width"),
+                "thumbnailHeight": thumbnail.get("height"),
                 "trainedWords": [str(word) for word in trained_words],
                 "files": files,
             }
@@ -447,6 +475,9 @@ class CivitaiClient:
                     or internal_version.get("name"),
                     "trainedWords": fallback_detail.get("trainedWords")
                     or internal_version.get("trainedWords")
+                    or [],
+                    "images": fallback_detail.get("images")
+                    or internal_version.get("images")
                     or [],
                 }
                 selected_version = export_version(

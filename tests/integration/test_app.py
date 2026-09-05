@@ -22,6 +22,15 @@ MODEL_VERSIONS = {
         "id": 501,
         "name": "v1",
         "trainedWords": ["amber style"],
+        "images": [
+            {
+                "url": (
+                    "https://image.civitai.com/example/original=true/amber-v1.jpeg"
+                ),
+                "width": 768,
+                "height": 1024,
+            }
+        ],
         "files": [
             {
                 "id": 7001,
@@ -85,6 +94,13 @@ MODEL_VERSIONS = {
         "id": 505,
         "name": "legacy",
         "trainedWords": ["amber legacy"],
+        "images": [
+            {
+                "url": "https://images.example.test/models/amber-legacy.jpeg",
+                "width": 1024,
+                "height": 768,
+            }
+        ],
         "files": [
             {
                 "id": 7006,
@@ -475,6 +491,9 @@ def test_multiple_collections_export_filenames_and_trained_words(live_app):
             "versionId": 501,
             "versionName": "v1",
             "modelUrl": "https://civitai.com/models/1001?modelVersionId=501",
+            "thumbnailUrl": "https://image.civitai.com/example/width=450/amber-v1.jpeg",
+            "thumbnailWidth": 768,
+            "thumbnailHeight": 1024,
             "trainedWords": ["amber style"],
             "files": [
                 {
@@ -491,6 +510,9 @@ def test_multiple_collections_export_filenames_and_trained_words(live_app):
             "versionId": 505,
             "versionName": "legacy",
             "modelUrl": "https://civitai.com/models/1001?modelVersionId=505",
+            "thumbnailUrl": "https://images.example.test/models/amber-legacy.jpeg",
+            "thumbnailWidth": 1024,
+            "thumbnailHeight": 768,
             "trainedWords": ["amber legacy"],
             "files": [
                 {
@@ -505,7 +527,12 @@ def test_multiple_collections_export_filenames_and_trained_words(live_app):
         },
     ]
     assert [
-        {key: value for key, value in item.items() if key != "versions"}
+        {
+            key: value
+            for key, value in item.items()
+            if key
+            not in {"versions", "thumbnailUrl", "thumbnailWidth", "thumbnailHeight"}
+        }
         for item in payload["collections"][0]["items"]
     ] == [
         {
@@ -550,6 +577,9 @@ def test_multiple_collections_export_filenames_and_trained_words(live_app):
             "versionId": 502,
             "versionName": "v2",
             "modelUrl": "https://civitai.com/models/1002?modelVersionId=502",
+            "thumbnailUrl": None,
+            "thumbnailWidth": None,
+            "thumbnailHeight": None,
             "trainedWords": ["blue detail"],
             "files": [
                 {
@@ -572,6 +602,25 @@ def test_multiple_collections_export_filenames_and_trained_words(live_app):
     ] == ["cobaltCharacter.safetensors", "cobaltCharacter.preview.png"]
 
 
+def test_selection_includes_version_aware_model_thumbnails(live_app):
+    response = requests.post(
+        f"{live_app}/api/selection",
+        json={"collectionIds": [11]},
+        timeout=5,
+    )
+
+    assert response.status_code == 200
+    item = response.json()["collections"][0]["items"][0]
+    assert item["thumbnailUrl"] == (
+        "https://image.civitai.com/example/width=450/amber-v1.jpeg"
+    )
+    assert item["thumbnailWidth"] == 768
+    assert item["thumbnailHeight"] == 1024
+    assert item["versions"][1]["thumbnailUrl"] == (
+        "https://images.example.test/models/amber-legacy.jpeg"
+    )
+
+
 def test_nsfw_collection_uses_mature_domain_and_exports_models(live_app):
     response = requests.post(
         f"{live_app}/api/selection",
@@ -583,7 +632,12 @@ def test_nsfw_collection_uses_mature_domain_and_exports_models(live_app):
     collection = response.json()["collections"][0]
     assert collection["name"] == "Public NSFW Models"
     assert [
-        {key: value for key, value in item.items() if key != "versions"}
+        {
+            key: value
+            for key, value in item.items()
+            if key
+            not in {"versions", "thumbnailUrl", "thumbnailWidth", "thumbnailHeight"}
+        }
         for item in collection["items"]
     ] == [
         {
