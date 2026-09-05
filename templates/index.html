@@ -19,7 +19,12 @@
           </div>
         </div>
         <p class="product-purpose">モデルの実体と呼び出し方を、ひとつの棚で確認する。</p>
-        <div class="key-status"><span aria-hidden="true"></span>API key stays local</div>
+        <div class="product-actions">
+          <div class="key-status"><span aria-hidden="true"></span>API key stays local</div>
+          <button type="button" class="catalog-sync-button" id="catalog-sync">
+            <span aria-hidden="true">↻</span> SYNC
+          </button>
+        </div>
       </header>
 
       {% if error %}
@@ -36,6 +41,55 @@
         </section>
       {% else %}
         <div class="workspace-frame">
+          <section class="global-search-pane" id="global-search" aria-labelledby="global-search-heading">
+            <div>
+              <p class="pane-label">GLOBAL MODEL SEARCH</p>
+              <h2 id="global-search-heading">すべてのコレクションから検索</h2>
+            </div>
+            <label class="global-search-field" for="item-search">
+              <span>MODEL / FILE NAME</span>
+              <input
+                type="search"
+                id="item-search"
+                placeholder="モデル名・ファイル名で検索"
+                autocomplete="off"
+              >
+            </label>
+            <p id="global-search-status" aria-live="polite">{{ collections|length }}コレクションを横断検索します</p>
+          </section>
+
+          <section class="template-pane" aria-labelledby="template-heading">
+            <div class="template-heading">
+              <p class="pane-label">SELECTION TEMPLATES</p>
+              <h2 id="template-heading">選択テンプレート</h2>
+              <p>コレクション、モデル、バージョンの選択状態を保存します。</p>
+            </div>
+            <div class="template-save-group">
+              <label for="template-name">NAME</label>
+              <div>
+                <input
+                  type="text"
+                  id="template-name"
+                  placeholder="テンプレート名"
+                  maxlength="60"
+                  autocomplete="off"
+                >
+                <button type="button" id="template-save">現在の選択を保存</button>
+              </div>
+            </div>
+            <div class="template-load-group">
+              <label for="template-list">SAVED</label>
+              <div>
+                <select id="template-list" aria-label="保存済みテンプレート">
+                  <option value="">保存済みテンプレートなし</option>
+                </select>
+                <button type="button" id="template-load" disabled>適用</button>
+                <button type="button" id="template-delete" disabled>削除</button>
+              </div>
+            </div>
+            <p class="template-status" id="template-status" aria-live="polite"></p>
+          </section>
+
           <aside class="library-pane" aria-labelledby="collection-heading">
             <div class="library-heading">
               <div>
@@ -106,22 +160,13 @@
                 <span aria-hidden="true">/</span>
                 <button type="button" id="item-clear-all">選択解除</button>
               </div>
-              <label class="item-search-field" for="item-search">
-                <span>FILTER</span>
-                <input
-                  type="search"
-                  id="item-search"
-                  placeholder="モデル名・ファイル名で検索"
-                  autocomplete="off"
-                >
-              </label>
             </div>
 
             <div class="item-picker-empty" id="item-picker-empty">
               <span class="item-picker-step" aria-hidden="true">02</span>
               <div>
-                <h3>先にコレクションを選択</h3>
-                <p>選択したコレクションに含まれるモデルをここへ並べます。</p>
+                <h3>コレクションを選択、または検索</h3>
+                <p>左側でコレクションを選ぶか、上部から全コレクションを検索してください。</p>
               </div>
             </div>
 
@@ -167,6 +212,34 @@
         </div>
       {% endif %}
     </main>
+
+    <div
+      class="catalog-loading-overlay"
+      id="catalog-loading-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="catalog-loading-title"
+      data-initial-state="{{ catalog_status.state if catalog_status else 'idle' }}"
+      {% if not catalog_status or catalog_status.state != 'running' %}hidden{% endif %}
+    >
+      <div class="catalog-loading-panel">
+        <p class="pane-label">MODEL CATALOG SYNC</p>
+        <h2 id="catalog-loading-title">モデル情報を収集中</h2>
+        <p id="catalog-progress-phase">準備中</p>
+        <progress id="catalog-progress" value="0" max="1"></progress>
+        <div class="catalog-progress-numbers">
+          <span id="catalog-progress-count">0 / 1</span>
+          <span id="catalog-progress-percent">0%</span>
+        </div>
+        <p id="catalog-progress-message" aria-live="polite">Civitaiへ接続しています…</p>
+        <p class="catalog-progress-error" id="catalog-progress-error" hidden></p>
+        <div class="catalog-progress-actions" id="catalog-progress-actions" hidden>
+          <button type="button" id="catalog-sync-retry">再試行</button>
+          <button type="button" id="catalog-sync-dismiss">保存済みデータを表示</button>
+        </div>
+        <p class="catalog-progress-notice">同期中は画面を操作できません。この画面を閉じずにお待ちください。</p>
+      </div>
+    </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   </body>

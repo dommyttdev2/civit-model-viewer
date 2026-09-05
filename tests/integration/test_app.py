@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -109,15 +111,19 @@ def trpc(data):
 
 class FakeCivitaiHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    model_attempts = {}
+    model_attempts_lock = threading.Lock()
 
     def log_message(self, format, *args):
         return
 
-    def send_json(self, payload, status=200):
+    def send_json(self, payload, status=200, headers=None):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -287,6 +293,16 @@ class FakeCivitaiHandler(BaseHTTPRequestHandler):
 
         if parsed.path.startswith("/api/v1/models/"):
             model_id = int(parsed.path.rsplit("/", 1)[1])
+            with self.model_attempts_lock:
+                attempts = self.model_attempts.get(model_id, 0) + 1
+                self.model_attempts[model_id] = attempts
+            if model_id == 1001 and attempts == 1:
+                self.send_json(
+                    {"error": "Rate limited"},
+                    status=429,
+                    headers={"Retry-After": "0"},
+                )
+                return
             self.send_json(
                 {
                     "id": model_id,
@@ -335,6 +351,7 @@ def running_server(server):
 
 @pytest.fixture
 def live_app():
+    FakeCivitaiHandler.model_attempts = {}
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeCivitaiHandler)
     upstream_url = f"http://127.0.0.1:{upstream.server_port}"
     mature_upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeCivitaiHandler)
@@ -348,6 +365,7 @@ def live_app():
             "CIVITAI_BASE_URL": upstream_url,
             "CIVITAI_MATURE_BASE_URL": mature_upstream_url,
             "CIVITAI_TIMEOUT": 2,
+            "USE_PERSISTENT_CATALOG": False,
         }
     )
     web = make_server("127.0.0.1", 0, app, threaded=True)
@@ -399,8 +417,35 @@ def test_browser_exposes_realtime_model_and_filename_search_without_submit_butto
     assert response.status_code == 200
     assert 'type="search"' in response.text
     assert 'id="item-search"' in response.text
+    assert 'id="global-search"' in response.text
     assert 'placeholder="モデル名・ファイル名で検索"' in response.text
     assert 'id="item-search-button"' not in response.text
+    item_tools = response.text.split('id="item-selection-tools"', 1)[1].split(
+        'id="item-picker-empty"', 1
+    )[0]
+    assert 'id="item-search"' not in item_tools
+
+
+def test_browser_exposes_named_selection_template_controls(live_app):
+    response = requests.get(live_app, timeout=3)
+
+    assert response.status_code == 200
+    assert 'id="template-name"' in response.text
+    assert 'placeholder="テンプレート名"' in response.text
+    assert 'id="template-save"' in response.text
+    assert 'id="template-list"' in response.text
+    assert 'id="template-load"' in response.text
+    assert 'id="template-delete"' in response.text
+
+
+def test_browser_exposes_explicit_catalog_sync_and_blocking_progress_overlay(live_app):
+    response = requests.get(live_app, timeout=3)
+
+    assert response.status_code == 200
+    assert 'id="catalog-sync"' in response.text
+    assert 'id="catalog-loading-overlay"' in response.text
+    assert 'id="catalog-progress"' in response.text
+    assert 'id="catalog-progress-message"' in response.text
 
 
 def test_multiple_collections_export_filenames_and_trained_words(live_app):
@@ -572,3 +617,77 @@ def test_collection_thumbnail_redirects_to_civitai_image(live_app):
 
     assert response.status_code == 302
     assert response.headers["Location"] == "https://images.example.test/9001.jpeg"
+
+
+def test_catalog_is_persisted_on_startup_and_only_resynced_explicitly():
+    FakeCivitaiHandler.model_attempts = {}
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeCivitaiHandler)
+    upstream_url = f"http://127.0.0.1:{upstream.server_port}"
+    mature_upstream = ThreadingHTTPServer(("127.0.0.1", 0), FakeCivitaiHandler)
+    mature_upstream.is_mature_domain = True
+    mature_upstream_url = f"http://127.0.0.1:{mature_upstream.server_port}"
+    catalog_path = Path("pytest-cache-files-catalog-model.json").resolve()
+    catalog_path.unlink(missing_ok=True)
+    app = create_app(
+        {
+            "TESTING": True,
+            "CIVITAI_API_KEY": API_KEY,
+            "CIVITAI_BASE_URL": upstream_url,
+            "CIVITAI_MATURE_BASE_URL": mature_upstream_url,
+            "CIVITAI_TIMEOUT": 2,
+            "CIVITAI_CATALOG_PATH": str(catalog_path),
+            "USE_PERSISTENT_CATALOG": True,
+            "START_CATALOG_SYNC": True,
+        }
+    )
+    web = make_server("127.0.0.1", 0, app, threaded=True)
+    web_url = f"http://127.0.0.1:{web.server_port}"
+
+    with running_server(upstream), running_server(mature_upstream), running_server(web):
+        deadline = time.monotonic() + 8
+        status = {}
+        while time.monotonic() < deadline:
+            response = requests.get(f"{web_url}/api/catalog/status", timeout=3)
+            assert response.status_code == 200
+            status = response.json()
+            if status["state"] == "ready":
+                break
+            time.sleep(0.05)
+
+        assert status["state"] == "ready"
+        assert status["completed"] == status["total"]
+        assert catalog_path.exists()
+        saved = json.loads(catalog_path.read_text(encoding="utf-8"))
+        assert saved["schemaVersion"] == 1
+        assert [collection["name"] for collection in saved["collections"]] == [
+            "Private Styles",
+            "Private Characters",
+            "Public NSFW Models",
+        ]
+        assert saved["collections"][0]["items"][0]["versions"][1]["files"][0][
+            "name"
+        ] == "amberStyle_legacy.safetensors"
+
+        first_generation = status["generation"]
+        requests.get(web_url, timeout=3)
+        reloaded_status = requests.get(
+            f"{web_url}/api/catalog/status", timeout=3
+        ).json()
+        assert reloaded_status["generation"] == first_generation
+        assert reloaded_status["state"] == "ready"
+
+        sync_response = requests.post(f"{web_url}/api/catalog/sync", timeout=3)
+        assert sync_response.status_code == 202
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            status = requests.get(
+                f"{web_url}/api/catalog/status", timeout=3
+            ).json()
+            if status["state"] == "ready" and status["generation"] > first_generation:
+                break
+            time.sleep(0.05)
+
+        assert status["state"] == "ready"
+        assert status["generation"] == first_generation + 1
+        assert status["changes"] == {"added": 0, "removed": 0, "updated": 0}
+    catalog_path.unlink(missing_ok=True)

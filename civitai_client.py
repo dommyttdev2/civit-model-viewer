@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -59,14 +60,30 @@ class CivitaiClient:
         *,
         base_url: str | None = None,
     ) -> Any:
-        try:
-            response = self._session().get(
-                f"{base_url or self.base_url}{path}",
-                params=params,
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            raise CivitaiError(f"Civitaiへの接続に失敗しました: {exc}") from exc
+        response = None
+        for attempt in range(4):
+            try:
+                response = self._session().get(
+                    f"{base_url or self.base_url}{path}",
+                    params=params,
+                    timeout=self.timeout,
+                )
+            except requests.RequestException as exc:
+                raise CivitaiError(f"Civitaiへの接続に失敗しました: {exc}") from exc
+
+            if response.status_code != 429 or attempt == 3:
+                break
+
+            retry_after = response.headers.get("Retry-After")
+            try:
+                delay = max(0.0, float(retry_after)) if retry_after is not None else None
+            except ValueError:
+                delay = None
+            if delay is None:
+                delay = (0.5 * (2**attempt)) + random.uniform(0.0, 0.25)
+            time.sleep(min(delay, 10.0))
+
+        assert response is not None
 
         if response.status_code in (401, 403):
             raise CivitaiError(
@@ -188,11 +205,25 @@ class CivitaiClient:
 
         return items
 
-    def get_model_version(self, version_id: int) -> dict[str, Any]:
-        return self._get_json(f"/api/v1/model-versions/{version_id}")
+    def get_model_version(
+        self, version_id: int, refresh: bool = False
+    ) -> dict[str, Any]:
+        cache_key = f"model-version:{version_id}"
+        if not refresh:
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached
+        detail = self._get_json(f"/api/v1/model-versions/{version_id}")
+        return self._cache_put(cache_key, detail, ttl=1800)
 
-    def get_model(self, model_id: int) -> dict[str, Any]:
-        return self._get_json(f"/api/v1/models/{model_id}")
+    def get_model(self, model_id: int, refresh: bool = False) -> dict[str, Any]:
+        cache_key = f"model:{model_id}"
+        if not refresh:
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached
+        detail = self._get_json(f"/api/v1/models/{model_id}")
+        return self._cache_put(cache_key, detail, ttl=1800)
 
     def get_image_url(self, image_id: int) -> str | None:
         response = self._get_json(
@@ -225,7 +256,13 @@ class CivitaiClient:
         url = self.get_image_url(int(image_id)) if image_id else None
         return self._cache_put(cache_key, url or "", ttl=600) or None
 
-    def export_collections(self, collection_ids: list[int]) -> list[dict[str, Any]]:
+    def export_collections(
+        self,
+        collection_ids: list[int],
+        *,
+        refresh_models: bool = False,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> list[dict[str, Any]]:
         available = {item["id"]: item for item in self.get_model_collections()}
         unknown = [collection_id for collection_id in collection_ids if collection_id not in available]
         if unknown:
@@ -237,8 +274,17 @@ class CivitaiClient:
                 executor.submit(self.get_collection_items, collection_id): collection_id
                 for collection_id in collection_ids
             }
+            completed_collections = 0
             for future in as_completed(futures):
-                item_sets[futures[future]] = future.result()
+                collection_id = futures[future]
+                item_sets[collection_id] = future.result()
+                completed_collections += 1
+                if progress_callback:
+                    progress_callback(
+                        completed_collections,
+                        len(collection_ids),
+                        f"コレクション {completed_collections}/{len(collection_ids)} を確認中",
+                    )
 
         model_rows: list[tuple[int, dict[str, Any]]] = []
         for collection_id in collection_ids:
@@ -255,18 +301,53 @@ class CivitaiClient:
         )
         models: dict[int, dict[str, Any]] = {}
         model_errors: dict[int, str] = {}
+        retryable_model_ids: set[int] = set()
         if model_ids:
-            with ThreadPoolExecutor(max_workers=min(8, len(model_ids))) as executor:
+            with ThreadPoolExecutor(max_workers=min(4, len(model_ids))) as executor:
                 futures = {
-                    executor.submit(self.get_model, model_id): model_id
+                    executor.submit(self.get_model, model_id, refresh_models): model_id
                     for model_id in model_ids
                 }
+                completed_models = 0
                 for future in as_completed(futures):
                     model_id = futures[future]
                     try:
                         models[model_id] = future.result()
                     except CivitaiError as exc:
                         model_errors[model_id] = str(exc)
+                        if exc.status_code == 429:
+                            retryable_model_ids.add(model_id)
+                    completed_models += 1
+                    if progress_callback:
+                        progress_callback(
+                            len(collection_ids) + completed_models,
+                            len(collection_ids) + len(model_ids),
+                            f"モデル {completed_models}/{len(model_ids)} を収集中",
+                        )
+
+        for retry_round in range(1, 4):
+            if not retryable_model_ids:
+                break
+            time.sleep(float(retry_round * 2))
+            pending_ids = list(retryable_model_ids)
+            for retry_index, model_id in enumerate(pending_ids, start=1):
+                if progress_callback:
+                    progress_callback(
+                        len(collection_ids) + len(model_ids) - len(pending_ids) + retry_index,
+                        len(collection_ids) + len(model_ids),
+                        (
+                            f"レート制限モデルを再試行中 "
+                            f"{retry_index}/{len(pending_ids)}（{retry_round}/3）"
+                        ),
+                    )
+                try:
+                    models[model_id] = self.get_model(model_id, refresh=True)
+                    model_errors.pop(model_id, None)
+                    retryable_model_ids.discard(model_id)
+                except CivitaiError as exc:
+                    model_errors[model_id] = str(exc)
+                    if exc.status_code != 429:
+                        retryable_model_ids.discard(model_id)
 
         fallback_ids: list[int] = []
         for _, item in model_rows:
@@ -285,7 +366,9 @@ class CivitaiClient:
         if fallback_ids:
             with ThreadPoolExecutor(max_workers=min(8, len(fallback_ids))) as executor:
                 futures = {
-                    executor.submit(self.get_model_version, version_id): version_id
+                    executor.submit(
+                        self.get_model_version, version_id, refresh_models
+                    ): version_id
                     for version_id in fallback_ids
                 }
                 for future in as_completed(futures):

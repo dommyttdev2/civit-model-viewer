@@ -1,4 +1,115 @@
 (() => {
+  const catalogSyncButton = document.querySelector("#catalog-sync");
+  const catalogOverlay = document.querySelector("#catalog-loading-overlay");
+  const catalogProgress = document.querySelector("#catalog-progress");
+  const catalogProgressPhase = document.querySelector("#catalog-progress-phase");
+  const catalogProgressCount = document.querySelector("#catalog-progress-count");
+  const catalogProgressPercent = document.querySelector("#catalog-progress-percent");
+  const catalogProgressMessage = document.querySelector("#catalog-progress-message");
+  const catalogProgressError = document.querySelector("#catalog-progress-error");
+  const catalogProgressActions = document.querySelector("#catalog-progress-actions");
+  const catalogSyncRetry = document.querySelector("#catalog-sync-retry");
+  const catalogSyncDismiss = document.querySelector("#catalog-sync-dismiss");
+  let catalogPollTimer = null;
+  let catalogWasRunning = catalogOverlay?.dataset.initialState === "running";
+
+  const showCatalogOverlay = () => {
+    catalogOverlay.hidden = false;
+    catalogSyncButton.disabled = true;
+  };
+
+  const hideCatalogOverlay = () => {
+    catalogOverlay.hidden = true;
+    catalogSyncButton.disabled = false;
+  };
+
+  const renderCatalogStatus = (status) => {
+    const total = Math.max(Number(status.total) || 1, 1);
+    const completed = Math.min(Math.max(Number(status.completed) || 0, 0), total);
+    const percent = Math.round((completed / total) * 100);
+    catalogProgress.max = total;
+    catalogProgress.value = completed;
+    catalogProgressPhase.textContent = status.phase || "準備中";
+    catalogProgressCount.textContent = `${completed} / ${total}`;
+    catalogProgressPercent.textContent = `${percent}%`;
+    catalogProgressMessage.textContent = status.message || "モデル情報を確認しています…";
+    catalogProgressError.hidden = !status.error;
+    catalogProgressError.textContent = status.error || "";
+    catalogProgressActions.hidden = status.state !== "error";
+  };
+
+  const pollCatalogStatus = async () => {
+    window.clearTimeout(catalogPollTimer);
+    try {
+      const response = await fetch("/api/catalog/status", { cache: "no-store" });
+      if (!response.ok) throw new Error("同期状態を取得できませんでした");
+      const status = await response.json();
+      renderCatalogStatus(status);
+      if (status.state === "running") {
+        catalogWasRunning = true;
+        showCatalogOverlay();
+        catalogPollTimer = window.setTimeout(pollCatalogStatus, 650);
+      } else if (status.state === "ready") {
+        hideCatalogOverlay();
+        if (catalogWasRunning) window.location.reload();
+      } else if (status.state === "error") {
+        catalogWasRunning = false;
+        showCatalogOverlay();
+        catalogSyncButton.disabled = false;
+      } else {
+        hideCatalogOverlay();
+      }
+    } catch (error) {
+      renderCatalogStatus({
+        state: "error",
+        phase: "接続エラー",
+        completed: 0,
+        total: 1,
+        message: "同期状態を確認できませんでした",
+        error: error.message,
+      });
+      showCatalogOverlay();
+      catalogSyncButton.disabled = false;
+    }
+  };
+
+  const startCatalogSync = async () => {
+    catalogWasRunning = true;
+    showCatalogOverlay();
+    renderCatalogStatus({
+      state: "running",
+      phase: "準備中",
+      completed: 0,
+      total: 1,
+      message: "Civitaiへ接続しています…",
+      error: null,
+    });
+    try {
+      const response = await fetch("/api/catalog/sync", { method: "POST" });
+      const status = await response.json();
+      if (!response.ok) throw new Error(status.error || "同期を開始できませんでした");
+      renderCatalogStatus(status);
+      pollCatalogStatus();
+    } catch (error) {
+      renderCatalogStatus({
+        state: "error",
+        phase: "同期失敗",
+        completed: 0,
+        total: 1,
+        message: "同期を開始できませんでした",
+        error: error.message,
+      });
+    }
+  };
+
+  catalogSyncButton?.addEventListener("click", startCatalogSync);
+  catalogSyncRetry?.addEventListener("click", startCatalogSync);
+  catalogSyncDismiss?.addEventListener("click", () => {
+    catalogWasRunning = false;
+    hideCatalogOverlay();
+  });
+  if (catalogOverlay && catalogSyncButton) pollCatalogStatus();
+
   const form = document.querySelector("#collection-form");
   if (!form) return;
 
@@ -15,6 +126,7 @@
   const clearAllItems = document.querySelector("#item-clear-all");
   const itemSearch = document.querySelector("#item-search");
   const itemSearchEmpty = document.querySelector("#item-search-empty");
+  const globalSearchStatus = document.querySelector("#global-search-status");
   const itemCount = document.querySelector("#item-selection-count");
   const itemStatus = document.querySelector("#item-picker-status");
   const resultsContent = document.querySelector("#results-content");
@@ -23,16 +135,29 @@
   const resultSummary = document.querySelector("#result-summary");
   const copyButton = document.querySelector("#copy-json");
   const toast = document.querySelector("#toast");
+  const templateName = document.querySelector("#template-name");
+  const templateSave = document.querySelector("#template-save");
+  const templateList = document.querySelector("#template-list");
+  const templateLoad = document.querySelector("#template-load");
+  const templateDelete = document.querySelector("#template-delete");
+  const templateStatus = document.querySelector("#template-status");
   let catalog = null;
+  let globalCatalog = null;
+  let globalSearchMode = false;
   let currentExport = null;
   let loadTimer = null;
+  let searchTimer = null;
   let requestSerial = 0;
   const selectedItemKeys = new Set();
+  const templateStorageKey = "civitai-collection-lens.selection-templates.v1";
 
   const selectedCollectionIds = () =>
     collectionCheckboxes
       .filter((checkbox) => checkbox.checked)
       .map((checkbox) => Number(checkbox.value));
+
+  const allCollectionIds = () =>
+    collectionCheckboxes.map((checkbox) => Number(checkbox.value));
 
   const itemKey = (collectionId, item) => `${collectionId}:${item.modelId}`;
   const itemCheckboxes = () => [...document.querySelectorAll(".item-checkbox")];
@@ -49,6 +174,115 @@
         : []
     );
     return normalizeSearch([item.modelName, ...fileNames].join("\n"));
+  };
+
+  const applyVersionToItem = (item, versionId) => {
+    const versions = Array.isArray(item.versions) && item.versions.length
+      ? item.versions
+      : [item];
+    const selectedVersion = versions.find(
+      (version) => String(version.versionId) === String(versionId)
+    );
+    if (!selectedVersion) return false;
+    item.versionId = selectedVersion.versionId;
+    item.versionName = selectedVersion.versionName;
+    item.modelUrl = selectedVersion.modelUrl;
+    item.trainedWords = selectedVersion.trainedWords;
+    item.files = selectedVersion.files;
+    delete item.error;
+    return true;
+  };
+
+  const readTemplates = () => {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(templateStorageKey) || "[]");
+      return Array.isArray(stored) ? stored : [];
+    } catch (_error) {
+      return [];
+    }
+  };
+
+  let selectionTemplates = readTemplates();
+
+  const writeTemplates = () => {
+    try {
+      window.localStorage.setItem(templateStorageKey, JSON.stringify(selectionTemplates));
+      return true;
+    } catch (_error) {
+      showToast("テンプレートをブラウザへ保存できませんでした", true);
+      return false;
+    }
+  };
+
+  const renderTemplateList = (selectedId = "") => {
+    templateList.replaceChildren();
+    if (!selectionTemplates.length) {
+      const empty = element("option", null, "保存済みテンプレートなし");
+      empty.value = "";
+      templateList.append(empty);
+    } else {
+      selectionTemplates.forEach((template) => {
+        const option = element("option", null, template.name);
+        option.value = template.id;
+        templateList.append(option);
+      });
+      templateList.value = selectionTemplates.some(
+        (template) => template.id === selectedId
+      )
+        ? selectedId
+        : selectionTemplates[0].id;
+    }
+    const hasTemplate = Boolean(templateList.value);
+    templateLoad.disabled = !hasTemplate;
+    templateDelete.disabled = !hasTemplate;
+    templateStatus.textContent = selectionTemplates.length
+      ? `${selectionTemplates.length}件保存済み`
+      : "ブラウザ内に保存します";
+  };
+
+  const currentTemplateState = () => {
+    if (!catalog) return [];
+    return catalog.collections.flatMap((collection) =>
+      collection.items
+        .filter((item) => selectedItemKeys.has(itemKey(collection.id, item)))
+        .map((item) => ({
+          collectionId: collection.id,
+          modelId: item.modelId,
+          versionId: item.versionId,
+        }))
+    );
+  };
+
+  const saveCurrentTemplate = () => {
+    const name = templateName.value.trim();
+    const items = currentTemplateState();
+    if (!name) {
+      showToast("テンプレート名を入力してください", true);
+      templateName.focus();
+      return;
+    }
+    if (!items.length) {
+      showToast("保存するモデルを選択してください", true);
+      return;
+    }
+
+    const existing = selectionTemplates.find(
+      (template) => normalizeSearch(template.name) === normalizeSearch(name)
+    );
+    const saved = {
+      id: existing?.id || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      collectionIds: selectedCollectionIds(),
+      items,
+      savedAt: new Date().toISOString(),
+    };
+    selectionTemplates = existing
+      ? selectionTemplates.map((template) => (template.id === existing.id ? saved : template))
+      : [...selectionTemplates, saved];
+    if (!writeTemplates()) return;
+    renderTemplateList(saved.id);
+    templateName.value = "";
+    showToast(existing ? "テンプレートを更新しました" : "テンプレートを保存しました");
   };
 
   const updateCollectionSelection = () => {
@@ -75,14 +309,13 @@
   const resetCatalog = () => {
     catalog = null;
     selectedItemKeys.clear();
-    itemSearch.value = "";
     itemSearchEmpty.hidden = true;
     itemGroups.replaceChildren();
     itemCount.textContent = "0";
     itemStatus.textContent = "";
     setPickerEmpty(
-      "先にコレクションを選択",
-      "選択したコレクションに含まれるモデルをここへ並べます。"
+      "コレクションを選択、または検索",
+      "左側でコレクションを選ぶか、上部から全コレクションを検索してください。"
     );
     resetResults();
   };
@@ -271,10 +504,17 @@
     const key = itemKey(collection.id, item);
     checkbox.type = "checkbox";
     checkbox.dataset.itemKey = key;
+    checkbox.dataset.collectionId = String(collection.id);
     checkbox.checked = selectedItemKeys.has(key);
     checkbox.addEventListener("change", () => {
-      if (checkbox.checked) selectedItemKeys.add(key);
-      else selectedItemKeys.delete(key);
+      if (checkbox.checked) {
+        selectedItemKeys.add(key);
+        const parentCollection = collectionCheckboxes.find(
+          (candidate) => Number(candidate.value) === Number(collection.id)
+        );
+        if (parentCollection) parentCollection.checked = true;
+        updateCollectionSelection();
+      } else selectedItemKeys.delete(key);
       updateSelectedResults();
       applyItemFilter();
     });
@@ -329,16 +569,7 @@
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     versionSelect.addEventListener("change", () => {
-      const selectedVersion = versions.find(
-        (version) => String(version.versionId) === versionSelect.value
-      );
-      if (!selectedVersion) return;
-      item.versionId = selectedVersion.versionId;
-      item.versionName = selectedVersion.versionName;
-      item.modelUrl = selectedVersion.modelUrl;
-      item.trainedWords = selectedVersion.trainedWords;
-      item.files = selectedVersion.files;
-      delete item.error;
+      if (!applyVersionToItem(item, versionSelect.value)) return;
 
       versionSummary.textContent = `${item.versionName} · VERSION ${item.versionId}`;
       fileFact.textContent = `${item.files.length} FILE${item.files.length === 1 ? "" : "S"}`;
@@ -401,8 +632,10 @@
     applyItemFilter();
   };
 
-  const loadSelection = async () => {
-    const collectionIds = selectedCollectionIds();
+  const loadSelection = async (
+    collectionIds = selectedCollectionIds(),
+    { globalSearch = false } = {}
+  ) => {
     if (!collectionIds.length) {
       requestSerial += 1;
       collectionStatus.textContent = "コレクションを選択してください";
@@ -425,17 +658,20 @@
       if (!response.ok) throw new Error(payload.error || "取得に失敗しました。");
       if (serial !== requestSerial) return;
       catalog = payload;
+      if (globalSearch) globalCatalog = payload;
       renderItemPicker(payload);
       const totalItems = payload.collections.reduce(
         (sum, collection) => sum + collection.items.length,
         0
       );
       collectionStatus.textContent = `${totalItems}件を読み込みました`;
+      return true;
     } catch (error) {
       if (serial !== requestSerial) return;
       collectionStatus.textContent = "取得に失敗しました";
       itemStatus.textContent = "";
       showToast(error.message || "取得に失敗しました。", true);
+      return false;
     } finally {
       if (serial === requestSerial) collectionStatus.classList.remove("is-loading");
     }
@@ -446,37 +682,157 @@
     loadTimer = window.setTimeout(loadSelection, 350);
   };
 
+  const runGlobalSearch = async () => {
+    const query = itemSearch.value.trim();
+    if (!query) {
+      globalSearchMode = false;
+      globalSearchStatus.textContent = `${collectionCheckboxes.length}コレクションを横断検索します`;
+      await loadSelection();
+      return;
+    }
+
+    globalSearchMode = true;
+    if (globalCatalog) {
+      catalog = globalCatalog;
+      renderItemPicker(globalCatalog);
+      globalSearchStatus.textContent = "全コレクションの取得済みデータを検索中";
+      return;
+    }
+
+    globalSearchStatus.textContent = "全コレクションを読み込んでいます…";
+    const loaded = await loadSelection(allCollectionIds(), { globalSearch: true });
+    if (loaded && itemSearch.value.trim()) {
+      globalSearchStatus.textContent = "全コレクションを検索中";
+      applyItemFilter();
+    }
+  };
+
+  const scheduleGlobalSearch = () => {
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(runGlobalSearch, 300);
+  };
+
+  const clearItemsForCollections = (collectionIds) => {
+    const deselectedIds = new Set(collectionIds.map((id) => String(id)));
+    [...selectedItemKeys].forEach((key) => {
+      const collectionId = key.split(":", 1)[0];
+      if (deselectedIds.has(collectionId)) selectedItemKeys.delete(key);
+    });
+    updateSelectedResults();
+    applyItemFilter();
+  };
+
+  const applySelectedTemplate = async () => {
+    const template = selectionTemplates.find(
+      (candidate) => candidate.id === templateList.value
+    );
+    if (!template) return;
+
+    const availableCollectionIds = new Set(
+      collectionCheckboxes.map((checkbox) => Number(checkbox.value))
+    );
+    const collectionIds = template.collectionIds.filter((id) =>
+      availableCollectionIds.has(Number(id))
+    );
+    if (!collectionIds.length) {
+      showToast("テンプレートのコレクションが見つかりません", true);
+      return;
+    }
+
+    collectionCheckboxes.forEach((checkbox) => {
+      checkbox.checked = collectionIds.includes(Number(checkbox.value));
+    });
+    selectedItemKeys.clear();
+    catalog = null;
+    globalSearchMode = false;
+    itemSearch.value = "";
+    updateCollectionSelection();
+    await loadSelection();
+    if (!catalog) return;
+
+    let restoredItems = 0;
+    template.items.forEach((savedItem) => {
+      const collection = catalog.collections.find(
+        (candidate) => Number(candidate.id) === Number(savedItem.collectionId)
+      );
+      const item = collection?.items.find(
+        (candidate) => Number(candidate.modelId) === Number(savedItem.modelId)
+      );
+      if (!collection || !item) return;
+      applyVersionToItem(item, savedItem.versionId);
+      selectedItemKeys.add(itemKey(collection.id, item));
+      restoredItems += 1;
+    });
+    renderItemPicker(catalog);
+    templateName.value = template.name;
+    showToast(`${template.name}を適用しました（${restoredItems}件）`);
+  };
+
+  const deleteSelectedTemplate = () => {
+    const template = selectionTemplates.find(
+      (candidate) => candidate.id === templateList.value
+    );
+    if (!template) return;
+    if (!window.confirm(`「${template.name}」を削除しますか？`)) return;
+    selectionTemplates = selectionTemplates.filter(
+      (candidate) => candidate.id !== template.id
+    );
+    if (!writeTemplates()) return;
+    renderTemplateList();
+    showToast("テンプレートを削除しました");
+  };
+
   collectionCheckboxes.forEach((checkbox) =>
     checkbox.addEventListener("change", () => {
+      if (!checkbox.checked) clearItemsForCollections([checkbox.value]);
       updateCollectionSelection();
-      scheduleLoad();
+      if (!globalSearchMode) scheduleLoad();
     })
   );
   selectAllCollections.addEventListener("click", () => {
     collectionCheckboxes.forEach((checkbox) => (checkbox.checked = true));
     updateCollectionSelection();
-    scheduleLoad();
+    if (!globalSearchMode) scheduleLoad();
   });
   clearAllCollections.addEventListener("click", () => {
     collectionCheckboxes.forEach((checkbox) => (checkbox.checked = false));
+    clearItemsForCollections(allCollectionIds());
     updateCollectionSelection();
-    scheduleLoad();
+    if (!globalSearchMode) scheduleLoad();
   });
 
   selectAllItems.addEventListener("click", () => {
     itemCheckboxes()
       .filter((checkbox) => !checkbox.closest(".item-option").hidden)
-      .forEach((checkbox) => selectedItemKeys.add(checkbox.dataset.itemKey));
+      .forEach((checkbox) => {
+        selectedItemKeys.add(checkbox.dataset.itemKey);
+        const parentCollection = collectionCheckboxes.find(
+          (candidate) =>
+            Number(candidate.value) === Number(checkbox.dataset.collectionId)
+        );
+        if (parentCollection) parentCollection.checked = true;
+      });
+    updateCollectionSelection();
     updateSelectedResults();
     applyItemFilter();
   });
   clearAllItems.addEventListener("click", () => {
-    selectedItemKeys.clear();
-    updateSelectedResults();
-    applyItemFilter();
+    clearItemsForCollections(allCollectionIds());
   });
 
-  itemSearch.addEventListener("input", applyItemFilter);
+  itemSearch.addEventListener("input", scheduleGlobalSearch);
+
+  templateSave.addEventListener("click", saveCurrentTemplate);
+  templateName.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") saveCurrentTemplate();
+  });
+  templateList.addEventListener("change", () => {
+    const hasTemplate = Boolean(templateList.value);
+    templateLoad.disabled = !hasTemplate;
+    templateDelete.disabled = !hasTemplate;
+  });
+  templateLoad.addEventListener("click", applySelectedTemplate);
+  templateDelete.addEventListener("click", deleteSelectedTemplate);
 
   copyButton.addEventListener("click", async () => {
     if (!currentExport) return;
@@ -489,4 +845,5 @@
   });
 
   updateCollectionSelection();
+  renderTemplateList();
 })();
